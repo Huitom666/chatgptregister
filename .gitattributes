@@ -1,0 +1,3 @@
+* text=auto
+# Keep CRLF in Windows launchers, including GitHub Download ZIP archives.
+*.bat -text whitespace=cr-at-eol
