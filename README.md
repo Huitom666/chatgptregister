@@ -5,6 +5,7 @@
 当前版本包含：
 
 - 默认获取 AT、ST，不获取 RT；RT 和 2FA 均可独立开关，2FA 默认开启。
+- Outlook 的 Microsoft 取 Token、Graph、IMAP 均使用本次注册的 HTTP / SOCKS5 代理；短暂网络错误有限重试，代理失败不回退直连。
 - 完整注册 JSON 保存、查看和导出。
 - 使用 `accounts` 格式推送账号池，携带已保存的设备、Cookie、CSRF、密码、2FA 密钥和注册日志；不发送 RT、ID Token。
 - 批量冷却以分钟设置，支持小数和 0，不再限制为 120 秒。
@@ -18,7 +19,7 @@
 3. 双击 `一键启动.bat` 或 `start_windows.bat`。首次启动会创建虚拟环境、安装依赖。
 4. 浏览器打开 `http://127.0.0.1:8765/`。
 
-前端已编译，不需要自行安装前端依赖。完整导入、配置、数据迁移和使用步骤见 [Windows 使用说明](WINDOWS_README.txt)。
+前端已编译，不需要自行安装前端依赖。邮箱代理功能需要新增的 PySocks 依赖，升级请使用完整程序，一键启动会自动安装；HTTP 代理需允许 CONNECT 到邮箱 993 端口。完整导入、配置、数据迁移和使用步骤见 [Windows 使用说明](WINDOWS_README.txt)。
 
 也可以通过 Git 下载：
 

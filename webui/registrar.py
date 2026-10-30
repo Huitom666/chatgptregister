@@ -115,6 +115,7 @@ _NETWORK_ERROR_PATTERNS = [
     "max retries exceeded",
     "invalid_state",
     "client_configuration", "warmup_missing_device_cookie",
+    "outlook_mail_network", "outlook_proxy_configuration",
 ]
 
 
@@ -224,7 +225,10 @@ def _do_register(
         # ─ 邮箱来源路由 ─
         # 原来是 if cf_temp / else outlook 的写死分支，加一种邮箱就得回来改。
         # 现在交给注册表工厂：provider 自己从 settings + account 里取需要的字段。
-        mail = create_mail_provider(mail_source, db.get_mail_settings(), account)
+        # This run's proxy must also cover Outlook token, Graph and IMAP traffic.
+        # Use a copied settings dict: never mutate global settings/environment.
+        mail_settings = {**db.get_mail_settings(), "_registration_proxy": cfg.proxy or ""}
+        mail = create_mail_provider(mail_source, mail_settings, account)
         logging.getLogger("registrar").info(
             f"[register] 邮箱来源: {mail_source} ({mail.display_name})"
         )
@@ -534,6 +538,13 @@ def _do_register(
 
     finally:
         # env 覆盖现在只挂在 AuthFlow 实例上，随实例一起回收，无需还原。
+        if "mail" in locals():
+            close_mail = getattr(mail, "close", None)
+            if callable(close_mail):
+                try:
+                    close_mail()
+                except Exception:
+                    logging.getLogger("registrar").warning("关闭邮箱网络会话失败")
         # 关闭 handler
         try:
             root_logger.removeHandler(handler)

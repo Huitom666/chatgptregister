@@ -65,6 +65,7 @@ def main():
     mail = OutlookMailProvider(
         email=email, password=password,
         client_id=client_id, refresh_token=refresh,
+        proxy=cfg.proxy or "",
     )
 
     flow = AuthFlow(cfg)
@@ -82,6 +83,8 @@ def main():
             logger.warning("[register] 但已拿到部分凭证，继续保存")
         else:
             raise
+    finally:
+        mail.close()
 
     logger.info(
         f"[register] 完成 email={d.get('email')} "

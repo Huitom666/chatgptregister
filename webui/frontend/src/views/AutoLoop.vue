@@ -110,6 +110,7 @@ async function call(fn, name) {
           </el-tag>
           <span class="hint">
             {{ proxyCount ? '各 worker 按顺序轮流取用' : '为空：所有 worker 用「单次注册」页填的单代理' }}
+            Outlook 取 Token、Graph 和 IMAP 跟随各任务的代理；代理失败不回退直连。
           </span>
           <el-button size="small" @click="router.push('/proxy')">管理代理池</el-button>
         </div>

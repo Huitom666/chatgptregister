@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent
 MIN_PYTHON = (3, 11)
 MAX_PYTHON = (3, 13)
 DEPENDENCY_CHECK = (
-    "import curl_cffi.requests, requests, fastapi, uvicorn, pydantic; "
+    "import curl_cffi.requests, requests, socks, fastapi, uvicorn, pydantic; "
     "assert int(pydantic.__version__.split('.')[0]) >= 2"
 )
 

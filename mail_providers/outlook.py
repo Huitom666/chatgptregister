@@ -9,25 +9,24 @@
 能力：pooled=True（号池 claim / 用完 mark_dead）
       ephemeral=False（地址固定，OpenAI 可能当老号处理）
 
-本文件由 mail_outlook.py 迁移而来，取件逻辑逐字保留未改。
+本文件由 mail_outlook.py 迁移而来，邮箱网络由实例级代理传输统一处理。
 mail_outlook.py 现为转发壳，旧 import 路径继续可用。
 """
 from __future__ import annotations
 
 import email as _email
 import email.utils as _eu
-import imaplib
-import json
 import logging
 import re
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
+from contextlib import closing
 from datetime import datetime
 from typing import Optional
 
 from .base import ConfigField, MailProvider, register, validate_email
+from .outlook_transport import OutlookNetworkError, OutlookProxyConfigurationError, OutlookTransport
 
 logger = logging.getLogger(__name__)
 
@@ -76,38 +75,52 @@ def _is_fatal_imap_error(exc: Exception) -> bool:
 # ──────────────────────── Microsoft OAuth ────────────────────────
 
 
-def _request_access_token(refresh_token: str, client_id: str, scope: str) -> dict:
+def _request_access_token(
+    refresh_token: str, client_id: str, scope: str, *,
+    transport: Optional[OutlookTransport] = None, proxy: str = "",
+) -> dict:
     """尝试多个 token endpoint 换 access_token，返回完整 JSON dict。"""
+    if transport is None:
+        with closing(OutlookTransport(proxy)) as owned:
+            return _request_access_token(refresh_token, client_id, scope, transport=owned)
     last_error = ""
+    saw_network_error = False
     for endpoint in TOKEN_ENDPOINTS:
         try:
-            body = urllib.parse.urlencode({
+            data = transport.request_json("POST", endpoint, data={
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
                 "client_id": client_id,
                 "scope": scope,
-            }).encode()
-            req = urllib.request.Request(endpoint, data=body)
-            resp = urllib.request.urlopen(req, timeout=15)
-            data = json.loads(resp.read())
+            }, timeout=15)
             if data.get("access_token"):
                 return data
             last_error = f"no access_token from {endpoint}"
         except urllib.error.HTTPError as e:
             text = e.read().decode("utf-8", errors="replace")[:300]
             last_error = f"HTTP {e.code} {endpoint}: {text}"
+            temporary_failure = e.code in (408, 429) or e.code >= 500
+            saw_network_error = saw_network_error or temporary_failure
             if e.code in (400, 401, 403):
                 continue
+            if not temporary_failure:
+                raise
+        except OutlookProxyConfigurationError:
             raise
-        except Exception as e:
-            last_error = f"{endpoint}: {e}"
+        except OutlookNetworkError:
+            last_error = "Microsoft 令牌端点网络请求失败（同一代理重试后仍失败）"
+            saw_network_error = True
             continue
+    # An unavailable endpoint prevents a reliable account verdict. A later
+    # fallback endpoint's scope/client rejection must not erase that evidence.
+    if saw_network_error:
+        raise OutlookNetworkError("Microsoft 取 Token 网络请求失败；未回退直连")
     raise FatalOutlookMailError(f"token 获取失败 (scope={scope}): {last_error}")
 
 
-def get_outlook_access_token(refresh_token: str, client_id: str) -> dict:
+def get_outlook_access_token(refresh_token: str, client_id: str, *, proxy: str = "") -> dict:
     """兼容旧调用：用 IMAP scope 换 token。"""
-    return _request_access_token(refresh_token, client_id, IMAP_SCOPE)
+    return _request_access_token(refresh_token, client_id, IMAP_SCOPE, proxy=proxy)
 
 
 # ──────────────────────── OTP 抽取 ────────────────────────
@@ -158,14 +171,21 @@ def fetch_otp_via_graph(
     threshold_ts: float = 0,
     deadline: float = 0,
     target_email: str = "",
+    *, transport: Optional[OutlookTransport] = None, proxy: str = "",
 ) -> str:
     """Graph API 轮询取 OTP。成功返回 6 位 OTP，认证失败抛 FatalOutlookMailError。"""
+    if transport is None:
+        with closing(OutlookTransport(proxy)) as owned:
+            return fetch_otp_via_graph(
+                email_addr, refresh_token, client_id, timeout, threshold_ts, deadline,
+                target_email, transport=owned,
+            )
     if not deadline:
         deadline = time.time() + max(60, timeout)
     if not threshold_ts:
         threshold_ts = time.time() - 300
 
-    data = _request_access_token(refresh_token, client_id, GRAPH_SCOPE)
+    data = _request_access_token(refresh_token, client_id, GRAPH_SCOPE, transport=transport)
     access_token = data["access_token"]
     cached_refresh = data.get("refresh_token", refresh_token)
     token_refreshed = False
@@ -179,12 +199,14 @@ def fetch_otp_via_graph(
                     access_token,
                     folder,
                     timeout=max(1.0, min(8.0, deadline - time.time())),
+                    transport=transport,
                 )
             except urllib.error.HTTPError as e:
                 if e.code == 401 and not token_refreshed:
                     try:
                         data = _request_access_token(
                             cached_refresh, client_id, GRAPH_SCOPE,
+                            transport=transport,
                         )
                         access_token = data["access_token"]
                         if data.get("refresh_token"):
@@ -194,6 +216,7 @@ def fetch_otp_via_graph(
                             access_token,
                             folder,
                             timeout=max(1.0, min(8.0, deadline - time.time())),
+                            transport=transport,
                         )
                     except FatalOutlookMailError:
                         raise
@@ -266,19 +289,23 @@ def fetch_otp_via_graph(
     raise TimeoutError(f"outlook Graph OTP timeout for {email_addr}")
 
 
-def _graph_list_messages(access_token: str, folder: str, timeout: float = 15) -> list:
+def _graph_list_messages(
+    access_token: str, folder: str, timeout: float = 15, *,
+    transport: Optional[OutlookTransport] = None, proxy: str = "",
+) -> list:
+    if transport is None:
+        with closing(OutlookTransport(proxy)) as owned:
+            return _graph_list_messages(access_token, folder, timeout, transport=owned)
     params = urllib.parse.urlencode({
         "$top": "15",
         "$orderby": "receivedDateTime DESC",
         "$select": "id,subject,bodyPreview,body,receivedDateTime,from,toRecipients",
     })
     url = f"{GRAPH_BASE}/me/mailFolders/{folder}/messages?{params}"
-    req = urllib.request.Request(url, headers={
+    data = transport.request_json("GET", url, headers={
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
-    })
-    resp = urllib.request.urlopen(req, timeout=timeout)
-    data = json.loads(resp.read())
+    }, timeout=timeout)
     value = data.get("value") or []
     return value if isinstance(value, list) else []
 
@@ -295,8 +322,15 @@ def fetch_otp_via_imap(
     threshold_ts: float = 0,
     deadline: float = 0,
     target_email: str = "",
+    *, transport: Optional[OutlookTransport] = None, proxy: str = "",
 ) -> str:
     """IMAP 轮询取 OTP（XOAUTH2 优先 + 密码兜底，双服务器轮询）。"""
+    if transport is None:
+        with closing(OutlookTransport(proxy)) as owned:
+            return fetch_otp_via_imap(
+                email_addr, refresh_token, client_id, password, timeout, threshold_ts,
+                deadline, target_email, transport=owned,
+            )
     if not deadline:
         deadline = time.time() + max(60, timeout)
     if not threshold_ts:
@@ -320,11 +354,15 @@ def fetch_otp_via_imap(
             # ── 刷新 access_token ──
             if use_xoauth2 and (not cached_token or time.time() - cached_at > 3000):
                 try:
-                    data = _request_access_token(cached_refresh, client_id, IMAP_SCOPE)
+                    data = _request_access_token(cached_refresh, client_id, IMAP_SCOPE, transport=transport)
                     cached_token = data["access_token"]
                     cached_at = time.time()
                     if data.get("refresh_token"):
                         cached_refresh = data["refresh_token"]
+                except (OutlookNetworkError, OutlookProxyConfigurationError):
+                    # A broken route is not a reason to disable OAuth or try a
+                    # different (possibly unsupported) authentication method.
+                    raise
                 except FatalOutlookMailError as e:
                     logger.warning(f"[outlook-imap] XOAUTH2 token 获取失败: {e}，禁用")
                     use_xoauth2 = False
@@ -345,7 +383,7 @@ def fetch_otp_via_imap(
                     break
                 if use_xoauth2 and cached_token:
                     try:
-                        M = imaplib.IMAP4_SSL(host, 993, timeout=30)
+                        M = transport.imap(host, 993, timeout=30)
                         auth_str = (
                             f"user={email_addr}\x01"
                             f"auth=Bearer {cached_token}\x01\x01"
@@ -366,7 +404,7 @@ def fetch_otp_via_imap(
 
                 if not M and use_password:
                     try:
-                        M = imaplib.IMAP4_SSL(host, 993, timeout=30)
+                        M = transport.imap(host, 993, timeout=30)
                         M.login(email_addr, password)
                     except Exception as e:
                         last_err = e
@@ -485,7 +523,7 @@ def fetch_otp_via_imap(
                 M.logout()
             except Exception:
                 pass
-        except FatalOutlookMailError:
+        except (FatalOutlookMailError, OutlookProxyConfigurationError):
             raise
         except Exception as e:
             if _is_fatal_imap_error(e):
@@ -525,7 +563,7 @@ class OutlookMailProvider(MailProvider):
 
     config_fields: list[ConfigField] = []   # 凭证来自号池，无全局配置
 
-    def __init__(self, email: str, password: str, client_id: str, refresh_token: str):
+    def __init__(self, email: str, password: str, client_id: str, refresh_token: str, *, proxy: str = ""):
         self.email = email
         self.password = password
         self.client_id = client_id
@@ -533,6 +571,11 @@ class OutlookMailProvider(MailProvider):
         self.last_persona = None
         self.catch_all_domain = email.split("@", 1)[1]
         self._dead = False
+        self._transport = OutlookTransport(proxy)
+        self.proxy = self._transport.proxy
+
+    def close(self):
+        self._transport.close()
 
     # ── 构造入口 ─────────────────────────────────────────
 
@@ -545,6 +588,7 @@ class OutlookMailProvider(MailProvider):
             password=account.get("password", ""),
             client_id=account["client_id"],
             refresh_token=account["refresh_token"],
+            proxy=settings.get("_registration_proxy", "") or "",
         )
 
     @classmethod
@@ -588,6 +632,7 @@ class OutlookMailProvider(MailProvider):
 
     def create_mailbox(self) -> str:
         logger.info(f"[mail] 使用 outlook 账号: {self.email}")
+        logger.info(f"[mail] Outlook 网络：{self._transport.description}；Microsoft Token / Graph / IMAP 共用本次设置")
         return self.email
 
     def wait_for_otp(
@@ -616,6 +661,7 @@ class OutlookMailProvider(MailProvider):
                     deadline=time.time() + method_timeout,
                     threshold_ts=strict_threshold,
                     target_email=email_addr,
+                    transport=self._transport,
                 )
             except Exception as e:
                 graph_error = e
@@ -639,6 +685,7 @@ class OutlookMailProvider(MailProvider):
                 timeout=method_timeout,
                 threshold_ts=strict_threshold,
                 target_email=email_addr,
+                transport=self._transport,
             )
         except Exception as e:
             if graph_error is not None:

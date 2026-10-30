@@ -3,6 +3,7 @@
 # HTTP 客户端：与已验证的浏览器配置表和 Windows 依赖保持一致
 curl-cffi==0.16.3
 requests>=2.31.0
+PySocks==1.7.1
 
 # WebUI（可选；只跑 register_outlook.py 命令行不需要）
 fastapi>=0.110.0

@@ -55,6 +55,7 @@ __all__ = [
 
 if __name__ == "__main__":
     import logging
+    import os
     import sys as _sys
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -69,10 +70,12 @@ if __name__ == "__main__":
         print(f"4 段格式错: 拿到 {len(parts)} 段")
         _sys.exit(2)
     e, p, c, r = parts
-    prov = OutlookMailProvider(e, p, c, r)
+    prov = OutlookMailProvider(e, p, c, r, proxy=os.environ.get("PROXY", ""))
     try:
         otp = prov.wait_for_otp(e, timeout=180)
         print(f"OTP: {otp}")
     except Exception as ex:
         print(f"ERR: {ex}")
         _sys.exit(1)
+    finally:
+        prov.close()

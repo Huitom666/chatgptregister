@@ -81,6 +81,7 @@ async function copyField(email, field) {
               </el-select>
               <div class="hint" style="margin-top: 4px">
                 Plus 检测、自动批量的兜底代理都复用这里；批量并发轮换请到「代理池」页管理。
+                Outlook 取 Token、Graph 和 IMAP 收信也使用本次代理，支持 HTTP / SOCKS5；HTTP 代理须允许连接邮箱 993 端口。留空明确直连。
               </div>
             </el-form-item>
             <el-form-item label="OTP 等待秒数">
