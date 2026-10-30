@@ -46,7 +46,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config import Config  # noqa: E402
-from auth_flow import AuthFlow  # noqa: E402
+from auth_flow import AuthAccountDeactivatedError, AuthFlow  # noqa: E402
 
 logger = logging.getLogger("two_factor")
 
@@ -187,7 +187,7 @@ def bind_totp_2fa_inline(flow: AuthFlow, access_token: str = "") -> dict | None:
     【省了多少】重走登录链要 ~40s，含一次 PoW（约 18s，最贵的一步）和一封
     验证码邮件；这条 6.2s、零 PoW、零邮件。
 
-    失败返回 None 让调用方回落到慢路径，不做异常抛出。
+    普通绑定失败返回 None；明确的账号停用错误必须向调用方传播。
     """
     try:
         at = access_token or getattr(getattr(flow, "result", None), "access_token", "")
@@ -195,7 +195,9 @@ def bind_totp_2fa_inline(flow: AuthFlow, access_token: str = "") -> dict | None:
             logger.warning("[2fa] 快路径：注册会话没有 access_token，回落慢路径")
             return None
         return _enroll_and_activate(flow, at)
-    except Exception as e:  # noqa: BLE001 — 绝不能拖垮已注册成功的号
+    except AuthAccountDeactivatedError:
+        raise
+    except Exception as e:  # noqa: BLE001 — 普通绑定失败允许回退
         logger.warning("[2fa] 快路径异常（回落慢路径）: %s", e)
         return None
 
@@ -213,8 +215,8 @@ def bind_totp_2fa(
     注册成功后为账号绑定 TOTP 2FA。
 
     成功 → 返回 {"secret", "factor_id", "session_id"}；
-    任何一步失败 / 前提不满足 / 已绑定 → 返回 None（仅记日志，绝不抛异常，
-    以免拖垮已经注册成功的号 —— 调用方 registrar 再套一层 try/except 兜底）。
+    普通绑定失败 / 前提不满足 / 已绑定 → 返回 None。
+    明确的账号停用错误向调用方传播，不能视为仅未绑定 2FA。
 
     ⚠️ 用【独立的 AuthFlow 实例】重走一遍 login 正式链（而非复用注册那个已完成
        signup 的 flow）：enroll 要求 session 有 login_challenge，注册走的是 signup
@@ -382,6 +384,8 @@ def bind_totp_2fa(
         # 9.5 ~ 11/11：和快路径完全同一套动作，共用 _enroll_and_activate
         return _enroll_and_activate(flow, at)
 
-    except Exception as e:  # noqa: BLE001 — 绑定任何异常都不能拖垮已注册成功的号
+    except AuthAccountDeactivatedError:
+        raise
+    except Exception as e:  # noqa: BLE001 — 普通绑定失败不影响注册结果
         logger.warning("[2fa] 绑定过程异常（账号仍有效，仅未绑 2FA）: %s", e)
         return None

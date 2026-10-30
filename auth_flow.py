@@ -57,6 +57,10 @@ class AuthSessionInvalidError(AuthFlowError):
     code = "invalid_state"
 
 
+class AuthAccountDeactivatedError(AuthFlowError):
+    code = "account_deactivated"
+
+
 # ── RFC 6238 TOTP 实现（用于 mfa-challenge 计算动态码）────────────
 def _hotp(secret_b32: str, counter: int, digits: int = 6) -> str:
     """HOTP 算法（RFC 4226）"""
@@ -1394,6 +1398,8 @@ class AuthFlow:
                 continue_url = ""
                 try:
                     continue_url = self._codex_drive_login_from_log_in(mail_provider=mail_provider)
+                except AuthAccountDeactivatedError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Codex 登录推进失败，改走 no-prompt 兜底: {e}")
                 if continue_url:
@@ -1465,6 +1471,8 @@ class AuthFlow:
                 redirect_uri=redirect_uri,
                 client_id=client_id,
             )
+        except AuthAccountDeactivatedError:
+            raise
         except Exception as e:
             logger.warning(f"Codex OAuth 交换异常: {e}")
             return False
@@ -1972,8 +1980,30 @@ class AuthFlow:
             pass
 
     @staticmethod
+    def _raise_if_account_deactivated(resp, stage: str) -> None:
+        """Keep a terminal account rejection intact without echoing its raw body."""
+        status = int(resp.status_code)
+        if 200 <= status < 300:
+            return
+        try:
+            payload = resp.json()
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        error = payload.get("error")
+        codes = [payload.get("code")]
+        if isinstance(error, dict):
+            codes.append(error.get("code"))
+        if "account_deactivated" in codes:
+            raise AuthAccountDeactivatedError(
+                stage, status, "OpenAI 账号已删除或停用，当前流程已停止，不会自动重试此邮箱",
+            )
+
+    @staticmethod
     def _require_auth_response_success(resp, stage: str) -> None:
         """拒绝挑战页和失败响应，防止在无效的认证会话上继续提交。"""
+        AuthFlow._raise_if_account_deactivated(resp, stage)
         status = int(resp.status_code)
         headers = {str(k).lower(): str(v) for k, v in (resp.headers or {}).items()}
         body = (resp.text or "")[:65536].lower()
@@ -2536,6 +2566,7 @@ class AuthFlow:
         )
         self._trace_http("validate_email_otp", resp)
         if resp.status_code != 200:
+            self._raise_if_account_deactivated(resp, "verify_otp")
             body = (resp.text or "")
             logger.warning(f"verify_otp FULL body ({resp.status_code}): {body[:2000]}")
             raise RuntimeError(f"OTP 验证失败: {resp.status_code} - {body[:260]}")
@@ -3306,6 +3337,8 @@ class AuthFlow:
             try:
                 self.verify_otp(otp_code)
                 self.fetch_client_auth_session_dump("post_verify_otp_new")
+            except AuthAccountDeactivatedError:
+                raise
             except RuntimeError as e:
                 # 偶发 401 错码，补发一次 OTP 并重试
                 if "401" in str(e):
@@ -3459,6 +3492,8 @@ class AuthFlow:
                 try:
                     otp_resp = self.verify_otp(otp_code)
                     self.fetch_client_auth_session_dump("post_verify_otp_existing")
+                except AuthAccountDeactivatedError:
+                    raise
                 except RuntimeError as e:
                     if any(code in str(e) for code in ("401", "409")):
                         logger.warning(f"OTP 首次验证失败，重发重试: {e}")
@@ -3552,10 +3587,12 @@ class AuthFlow:
         # ── 钩子：session 到手、Codex 授权之前 ──
         # 主人指定的顺序是「注册完 → 绑 2FA → Codex 授权 → 接码」。这里是唯一同时满足
         # 「已经有 access_token」和「Codex 还没跑」的位置，所以插在这。
-        # 失败绝不能拖垮已注册成功的号 —— 异常吞掉，继续往下走 Codex。
+        # 普通绑定失败允许继续；明确的账号停用必须终止。
         if self._on_session_ready is not None and self.result.access_token:
             try:
                 self._on_session_ready(self, self.result.access_token)
+            except AuthAccountDeactivatedError:
+                raise
             except Exception as e:
                 logger.warning(f"session_ready 回调失败（不影响注册）: {e}")
 
@@ -3711,6 +3748,8 @@ class AuthFlow:
                         page_type or "(empty)",
                         (continue_url or "")[:180] or "(empty)",
                     )
+            except AuthAccountDeactivatedError:
+                raise
             except Exception as e:
                 logger.warning(f"login screen_hint 探测失败，回退 signup 探测: {e}")
                 continue_url = ""
@@ -3754,6 +3793,8 @@ class AuthFlow:
             try:
                 otp_resp = self.verify_otp(otp_code)
                 self.fetch_client_auth_session_dump("post_verify_otp_protocol")
+            except AuthAccountDeactivatedError:
+                raise
             except RuntimeError as e:
                 if any(code in str(e) for code in ("401", "409")):
                     logger.warning(f"OTP 首次验证失败，重发重试: {e}")

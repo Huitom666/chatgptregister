@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]  # gpt-outlook-register/
 sys.path.insert(0, str(ROOT))
 
 from config import Config  # noqa: E402
-from auth_flow import AuthFlow  # noqa: E402
+from auth_flow import AuthAccountDeactivatedError, AuthFlow  # noqa: E402
 from mail_providers import (  # noqa: E402
     MailProviderError,
     create_mail_provider,
@@ -129,6 +129,7 @@ def classify_error(err: str, mail_source: str = "") -> str:
     s = (err or "").lower()
 
     account_patterns = [
+        "account_deactivated", "openai 账号已删除或停用",
         "wrong_email_otp_code", "invalid_grant", "imap xoauth2",
         "outlook imap account unusable", "user is authenticated but not connected",
         "outlook refresh failed", "authentication failed", "authenticate failed",
@@ -313,6 +314,9 @@ def _do_register(
             result = flow.run_register(mail)
             registration_returned_success = True
             d = result.to_dict()
+        except AuthAccountDeactivatedError:
+            # A terminal rejection cannot be rescued by previously captured tokens.
+            raise
         except RuntimeError as e:
             # 部分凭证也算成功（OTP 验证通过 + create_account 成功 → flow.result 有 token）
             d = flow.result.to_dict()
@@ -396,7 +400,7 @@ def _do_register(
         #        四个请求全 200，mfa_enabled=true）。
         #     慢 bind_totp_2fa —— 新起 AuthFlow 重走 login 正式链，约 40s + 一次 PoW
         #        + 一封验证码邮件。只在快路径没成时兜底。
-        #   失败仅告警、绝不废掉已注册成功的号；secret 一次性下发，成功即随 d 落库+推前端。
+        #   普通绑定失败仅告警；明确账号停用则终止。secret 一次性下发，成功随 d 落库。
         #   ⚠️ 入口条件**不查密码**：快路径只要 access_token。密码只是慢路径
         #      （重走 login 链）的前提，所以判断挪到回落那一步再做。
         if options.get("want_2fa", True):
@@ -438,6 +442,8 @@ def _do_register(
                     logging.getLogger("registrar").warning(
                         "[register] 2FA 绑定未成功（账号仍有效，仅未绑 2FA）"
                     )
+            except AuthAccountDeactivatedError:
+                raise
             except Exception as e:
                 logging.getLogger("registrar").warning(
                     f"[register] 2FA 绑定异常（账号仍有效）: {e}"

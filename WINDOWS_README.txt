@@ -1,6 +1,14 @@
 gpt-auto-register 修改版 · Windows 使用说明
 打包日期：2026-10-30
 
+v14 账号错误分类修正：OpenAI 返回 account_deactivated 时，明确显示
+「OpenAI 账号已删除或停用」，归为 account 错误，不再显示 unknown。
+此类错误立即结束本次流程，不重发验证码；邮箱标记为 failed，不放回 available，
+自动批量不会再次选择它。即便已取得部分凭证，也不作为成功保存或推送账号池。
+这不表示 Outlook 邮箱停用，也不能解除 OpenAI 的账号状态；请核对官方账号通知。
+请不要将该邮箱重置为可用或手动重试；后续恢复后再人工处理。历史失败记录不回写。
+升级前等待所有任务结束、关闭旧程序并备份 webui\webui.db，使用完整新包启动。
+
 v13 邮箱代理更新：Outlook 的 Microsoft 取 Token、Graph 读信、IMAP 收信均跟随
 本次注册任务的代理。单次使用页面填写的代理；批量使用该 worker 实际选中的代理。
 支持 http://host:port、socks5://host:port（也支持 socks5h://）及用户名密码认证。
