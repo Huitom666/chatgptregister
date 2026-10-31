@@ -129,6 +129,7 @@ def classify_error(err: str, mail_source: str = "") -> str:
     s = (err or "").lower()
 
     account_patterns = [
+        "outlook_mail_auth",
         "account_deactivated", "openai 账号已删除或停用",
         "wrong_email_otp_code", "invalid_grant", "imap xoauth2",
         "outlook imap account unusable", "user is authenticated but not connected",

@@ -1,5 +1,14 @@
 gpt-auto-register 修改版 · Windows 使用说明
-打包日期：2026-10-30
+打包日期：2026-10-31
+
+v15 邮箱认证失败处理：微软 OAuth 授权被拒绝且 IMAP 密码登录已禁用时，明确显示
+「Outlook 邮箱认证或授权不可用」，归为 account，邮箱保留 failed，不自动回池重试。
+这不表示 OpenAI 账号已停用。请通过微软重新授权，更新匹配的 client_id / refresh_token。
+Graph 或某个 IMAP 服务器仍有网络故障时，保留为不确定的网络错误，避免误判邮箱。
+去掉 Graph / IMAP 轮询至少 60 秒的限制，等待间隔按剩余轮询时间裁剪。
+该设置是轮询预算；取 Token、多服务器连接及单次网络超时仍可能使总耗时超出预算。
+微软邮箱的 refresh_token 用于收信，与“不获取 ChatGPT RT”的开关无关。
+升级请等待任务结束并退出旧程序，备份 webui\webui.db，使用完整新包重新启动。
 
 v14 账号错误分类修正：OpenAI 返回 account_deactivated 时，明确显示
 「OpenAI 账号已删除或停用」，归为 account 错误，不再显示 unknown。

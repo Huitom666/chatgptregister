@@ -56,6 +56,9 @@ IMAP_HOST = IMAP_SERVERS[-1]
 class FatalOutlookMailError(RuntimeError):
     """Non-retryable Outlook mail error."""
 
+    def __init__(self, message: str):
+        super().__init__(f"outlook_mail_auth: Outlook 邮箱认证或授权不可用：{message}")
+
 
 _FATAL_IMAP_ERROR_PATTERNS = (
     "user is authenticated but not connected",
@@ -64,10 +67,14 @@ _FATAL_IMAP_ERROR_PATTERNS = (
     "imap xoauth2",
     "invalid_grant",
     "invalid_client",
+    "basic authentication is disabled",
+    "login failed",
 )
 
 
 def _is_fatal_imap_error(exc: Exception) -> bool:
+    if isinstance(exc, (OutlookNetworkError, OutlookProxyConfigurationError)):
+        return False
     msg = str(exc or "").lower()
     return any(p in msg for p in _FATAL_IMAP_ERROR_PATTERNS)
 
@@ -181,7 +188,7 @@ def fetch_otp_via_graph(
                 target_email, transport=owned,
             )
     if not deadline:
-        deadline = time.time() + max(60, timeout)
+        deadline = time.time() + max(1, timeout)
     if not threshold_ts:
         threshold_ts = time.time() - 300
 
@@ -218,7 +225,7 @@ def fetch_otp_via_graph(
                             timeout=max(1.0, min(8.0, deadline - time.time())),
                             transport=transport,
                         )
-                    except FatalOutlookMailError:
+                    except (FatalOutlookMailError, OutlookProxyConfigurationError):
                         raise
                     except urllib.error.HTTPError as e2:
                         if e2.code in (401, 403):
@@ -236,6 +243,8 @@ def fetch_otp_via_graph(
                 else:
                     logger.debug(f"[outlook-graph] {folder} HTTP {e.code}")
                     continue
+            except OutlookProxyConfigurationError:
+                raise
             except Exception as e:
                 logger.debug(f"[outlook-graph] {folder} 请求异常: {e}")
                 continue
@@ -284,7 +293,9 @@ def fetch_otp_via_graph(
                     return otp
 
         token_refreshed = False
-        time.sleep(4)
+        remaining = deadline - time.time()
+        if remaining > 0:
+            time.sleep(min(4, remaining))
 
     raise TimeoutError(f"outlook Graph OTP timeout for {email_addr}")
 
@@ -332,7 +343,7 @@ def fetch_otp_via_imap(
                 deadline, target_email, transport=owned,
             )
     if not deadline:
-        deadline = time.time() + max(60, timeout)
+        deadline = time.time() + max(1, timeout)
     if not threshold_ts:
         threshold_ts = time.time() - 300
 
@@ -342,6 +353,7 @@ def fetch_otp_via_imap(
     cached_at: float = 0.0
     use_xoauth2 = bool(client_id and refresh_token)
     use_password = bool(password)
+    oauth_rejected = False
     folders_to_scan = ["INBOX", "Junk", "Junk Email", "Spam"]
     found_folders: list[str] | None = None
 
@@ -365,19 +377,19 @@ def fetch_otp_via_imap(
                     raise
                 except FatalOutlookMailError as e:
                     logger.warning(f"[outlook-imap] XOAUTH2 token 获取失败: {e}，禁用")
+                    oauth_rejected = True
                     use_xoauth2 = False
                     cached_token = ""
                     if not use_password:
                         raise
                 except Exception as e:
-                    logger.warning(f"[outlook-imap] XOAUTH2 token 获取异常: {e}，禁用")
-                    use_xoauth2 = False
-                    cached_token = ""
-                    if not use_password:
-                        raise
+                    # Unknown failures do not establish that OAuth is unusable.
+                    raise OutlookNetworkError("Microsoft 取 Token 未完成，保留 OAuth 方式等待重试") from None
 
             # ── 连接 IMAP（多服务器 + 多认证方式）──
             last_err = None
+            uncertain_failure = False
+            password_auth_disabled = False
             for host in IMAP_SERVERS:
                 if M:
                     break
@@ -391,11 +403,14 @@ def fetch_otp_via_imap(
                         M.authenticate("XOAUTH2", lambda x: auth_str.encode())
                     except Exception as e:
                         last_err = e
+                        uncertain_failure = uncertain_failure or not _is_fatal_imap_error(e)
                         try:
                             M.logout()
                         except Exception:
                             pass
                         M = None
+                        if isinstance(e, OutlookProxyConfigurationError):
+                            raise
                         if _is_fatal_imap_error(e):
                             logger.info(
                                 f"[outlook-imap] XOAUTH2 host={host} failed, "
@@ -408,16 +423,32 @@ def fetch_otp_via_imap(
                         M.login(email_addr, password)
                     except Exception as e:
                         last_err = e
+                        uncertain_failure = uncertain_failure or not _is_fatal_imap_error(e)
+                        password_auth_disabled = password_auth_disabled or (
+                            "basic authentication is disabled" in str(e).lower()
+                        )
                         try:
                             M.logout()
                         except Exception:
                             pass
                         M = None
+                        if isinstance(e, OutlookProxyConfigurationError):
+                            raise
 
             if not M:
-                if last_err and _is_fatal_imap_error(last_err):
-                    raise FatalOutlookMailError(f"IMAP 登录失败: {last_err}")
-                raise RuntimeError(f"IMAP 连接失败: {last_err}")
+                if last_err and not uncertain_failure:
+                    if password_auth_disabled:
+                        detail = "IMAP 密码登录已被微软禁用"
+                        if oauth_rejected:
+                            detail = "Microsoft OAuth 取 Token 被拒绝，且" + detail
+                    else:
+                        detail = "IMAP 各可用服务器均拒绝了当前登录凭据"
+                    raise FatalOutlookMailError(
+                        detail + "；请重新授权并更新邮箱的 client_id / refresh_token，已停止重试"
+                    ) from None
+                # Do not embed an earlier auth rejection: the registrar also
+                # classifies text, and this mixed result is still inconclusive.
+                raise OutlookNetworkError("IMAP 连接未完成，存在网络或未明确的请求失败") from None
 
             # ── 探测文件夹（首次） ──
             if found_folders is None:
@@ -528,15 +559,17 @@ def fetch_otp_via_imap(
         except Exception as e:
             if _is_fatal_imap_error(e):
                 raise FatalOutlookMailError(
-                    f"IMAP 不可用 {email_addr}: {e}"
-                ) from e
+                    "IMAP 拒绝了当前认证；请更新微软邮箱授权，已停止重试"
+                ) from None
             logger.warning(f"[outlook-imap] 异常 (重试): {e}")
             if M:
                 try:
                     M.logout()
                 except Exception:
                     pass
-        time.sleep(4)
+        remaining = deadline - time.time()
+        if remaining > 0:
+            time.sleep(min(4, remaining))
     raise TimeoutError(f"outlook IMAP OTP timeout for {email_addr}")
 
 
@@ -663,6 +696,8 @@ class OutlookMailProvider(MailProvider):
                     target_email=email_addr,
                     transport=self._transport,
                 )
+            except OutlookProxyConfigurationError:
+                raise
             except Exception as e:
                 graph_error = e
                 logger.warning(
@@ -693,4 +728,12 @@ class OutlookMailProvider(MailProvider):
                     f"[mail] IMAP 也失败 ({type(e).__name__}: {e})；"
                     f"Graph 先前错误: {type(graph_error).__name__}: {graph_error}"
                 )
+            if isinstance(e, FatalOutlookMailError):
+                if has_oauth and not isinstance(graph_error, FatalOutlookMailError):
+                    # Graph may still have valid credentials despite an outage
+                    # or an empty polling window. Do not retire this mailbox.
+                    raise OutlookNetworkError(
+                        "Graph 收信未完成，IMAP 也未能收信；尚不能确认全部邮箱授权不可用"
+                    ) from None
+                self.mark_dead("邮箱认证或授权不可用，请更新微软邮箱授权后再使用")
             raise
